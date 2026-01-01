@@ -404,9 +404,9 @@ export default function Page() {
     useSensor(PointerSensor, {
       activationConstraint: { distance: 4 }, // PC：押して少し動かしたらドラッグ開始
     }),
-    useSensor(TouchSensor, {
-      activationConstraint: { distance: 6 }, // スマホ：タップして少し動かしたら開始
-    }),
+useSensor(TouchSensor, {
+  activationConstraint: { delay: 180, tolerance: 8 },
+}),
     useSensor(KeyboardSensor)
   );
 
