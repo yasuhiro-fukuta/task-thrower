@@ -17,6 +17,24 @@ import {
   type Task,
 } from "@/lib/taskStore";
 
+import {
+  DndContext,
+  PointerSensor,
+  TouchSensor,
+  KeyboardSensor,
+  closestCenter,
+  useSensor,
+  useSensors,
+  DragEndEvent,
+} from "@dnd-kit/core";
+import {
+  SortableContext,
+  useSortable,
+  arrayMove,
+  verticalListSortingStrategy,
+} from "@dnd-kit/sortable";
+import { CSS } from "@dnd-kit/utilities";
+
 type ThrowAction =
   | "TOMORROW"
   | "DAY_AFTER"
@@ -52,6 +70,106 @@ function nextSorter(todayTasks: Task[]): number {
   return (max || 0) + 1000;
 }
 
+/**
+ * dnd-kit: タスク行（行全体を掴める）
+ * ただし、チェックボックス・ボタンはクリックできるように "drag開始を止める" 対策を入れる
+ */
+function SortableTaskRow(props: {
+  task: Task;
+  busy: boolean;
+  checked: boolean;
+  onToggle: () => void;
+  onWeek: () => void;
+  onDone: () => void;
+  onRemove: () => void;
+}) {
+  const { task, busy, checked, onToggle, onWeek, onDone, onRemove } = props;
+
+  const { attributes, listeners, setNodeRef, transform, transition, isDragging } =
+    useSortable({ id: task.id });
+
+  const style: React.CSSProperties = {
+    transform: CSS.Transform.toString(transform),
+    transition,
+    opacity: isDragging ? 0.75 : 1,
+    // モバイルでドラッグを効かせる
+    touchAction: "none",
+  };
+
+  const stopDragStart = (e: React.SyntheticEvent) => {
+    // 行全体に drag listener が乗るので、操作系UIはドラッグ開始を止める
+    e.stopPropagation();
+  };
+
+  return (
+    <li
+      ref={setNodeRef}
+      style={style}
+      className={[
+        "rounded-lg border px-3 py-2 text-sm",
+        "border-neutral-800 bg-neutral-950",
+        isDragging ? "ring-2 ring-neutral-600" : "",
+      ].join(" ")}
+      // 行全体を掴める（PCもスマホも）
+      {...attributes}
+      {...listeners}
+    >
+      <div className="flex items-center gap-2">
+        {/* 並び替え用の見た目（ハンドルじゃなく飾り。掴むのは行全体） */}
+        <span className="select-none text-neutral-600">⋮⋮</span>
+
+        <input
+          type="checkbox"
+          checked={checked}
+          onChange={onToggle}
+          disabled={busy}
+          onPointerDownCapture={stopDragStart}
+          onTouchStartCapture={stopDragStart}
+          onMouseDownCapture={stopDragStart}
+        />
+
+        <div className="flex-1">{task.title}</div>
+
+        <button
+          type="button"
+          onClick={onWeek}
+          disabled={busy}
+          className="rounded border border-neutral-800 px-2 py-1 text-xs hover:bg-neutral-900 disabled:opacity-50"
+          onPointerDownCapture={stopDragStart}
+          onTouchStartCapture={stopDragStart}
+          onMouseDownCapture={stopDragStart}
+        >
+          1週間後へ
+        </button>
+
+        <button
+          type="button"
+          onClick={onDone}
+          disabled={busy}
+          className="rounded border border-neutral-800 px-2 py-1 text-xs hover:bg-neutral-900 disabled:opacity-50"
+          onPointerDownCapture={stopDragStart}
+          onTouchStartCapture={stopDragStart}
+          onMouseDownCapture={stopDragStart}
+        >
+          完了
+        </button>
+
+        <button
+          type="button"
+          onClick={onRemove}
+          disabled={busy}
+          className="rounded border border-neutral-800 px-2 py-1 text-xs hover:bg-neutral-900 disabled:opacity-50"
+          onPointerDownCapture={stopDragStart}
+          onTouchStartCapture={stopDragStart}
+          onMouseDownCapture={stopDragStart}
+        >
+          除去
+        </button>
+      </div>
+    </li>
+  );
+}
+
 export default function Page() {
   // Auth
   const [user, setUser] = useState<User | null>(null);
@@ -69,9 +187,6 @@ export default function Page() {
   const [selected, setSelected] = useState<Record<string, boolean>>({});
   const [throwAction, setThrowAction] = useState<ThrowAction>("WEEK");
 
-  // drag
-  const [dragOverId, setDragOverId] = useState<string | null>(null);
-
   // toast
   const [msg, setMsg] = useState<string | null>(null);
   const toast = (s: string) => {
@@ -88,11 +203,8 @@ export default function Page() {
     return onAuthStateChanged(auth, async (u) => {
       setUser(u);
       setSelected({});
-      if (u) {
-        await refresh(u);
-      } else {
-        setAllTasks([]);
-      }
+      if (u) await refresh(u);
+      else setAllTasks([]);
     });
   }, []);
 
@@ -287,46 +399,52 @@ export default function Page() {
     }
   };
 
-  // 8) 今日タスク D&D 並び替え → sorter更新
-  const handleDrop = async (fromId: string, toId: string) => {
+  // dnd-kit sensors
+  const sensors = useSensors(
+    useSensor(PointerSensor, {
+      activationConstraint: { distance: 4 }, // PC：押して少し動かしたらドラッグ開始
+    }),
+    useSensor(TouchSensor, {
+      activationConstraint: { distance: 6 }, // スマホ：タップして少し動かしたら開始
+    }),
+    useSensor(KeyboardSensor)
+  );
+
+  // 8) 並べ替え：dropでsorter更新（今日タスクのみ）
+  const onDragEnd = async (event: DragEndEvent) => {
+    const { active, over } = event;
+    if (!active?.id || !over?.id) return;
+    if (active.id === over.id) return;
     if (!user) return setAuthOpen(true);
-    if (!fromId || !toId || fromId === toId) return;
 
-    const fromIndex = todayTasks.findIndex((t) => t.id === fromId);
-    const toIndex = todayTasks.findIndex((t) => t.id === toId);
-    if (fromIndex < 0 || toIndex < 0) return;
+    const ids = todayTasks.map((t) => t.id);
+    const oldIndex = ids.indexOf(String(active.id));
+    const newIndex = ids.indexOf(String(over.id));
+    if (oldIndex < 0 || newIndex < 0) return;
 
-    const reordered = [...todayTasks];
-    const [moved] = reordered.splice(fromIndex, 1);
-    reordered.splice(toIndex, 0, moved);
+    const moved = arrayMove(todayTasks, oldIndex, newIndex);
 
     // sorterを 1000,2000,... に振り直し
-    const mapping = new Map<string, number>();
-    const updates = reordered.map((t, i) => {
-      const sorter = (i + 1) * 1000;
-      mapping.set(t.id, sorter);
-      return { id: t.id, sorter };
-    });
+    const updates = moved.map((t, i) => ({ id: t.id, sorter: (i + 1) * 1000 }));
 
     setBusy(true);
     try {
-      await updateSorters(updates);
-
-      // ローカルも反映（体感を即時に）
+      // 先にローカル反映（体感速い）
+      const map = new Map(updates.map((u) => [u.id, u.sorter]));
       setAllTasks((prev) =>
         prev.map((t) => {
-          const s = mapping.get(t.id);
+          const s = map.get(t.id);
           return s ? { ...t, sorter: s } : t;
         })
       );
 
-      toast("並び替え");
+      await updateSorters(updates);
+      toast("並べ替え");
     } catch (err: any) {
-      toast(String(err?.message ?? err ?? "並び替え失敗"));
+      toast(String(err?.message ?? err ?? "並べ替え失敗"));
       await refresh(user);
     } finally {
       setBusy(false);
-      setDragOverId(null);
     }
   };
 
@@ -336,7 +454,6 @@ export default function Page() {
         <div>
           <div className="text-xl font-semibold">Task Thrower</div>
 
-          {/* 1) 左上日付：初期シス日付 / 手動変更可 */}
           <div className="mt-2">
             <input
               type="date"
@@ -373,7 +490,6 @@ export default function Page() {
         </div>
       </header>
 
-      {/* 2) タスク追加：左上日付で作成 */}
       <form onSubmit={onAdd} className="mt-4 flex gap-2">
         <input
           value={title}
@@ -401,82 +517,33 @@ export default function Page() {
         {todayTasks.length === 0 ? (
           <div className="mt-3 text-sm text-neutral-500">空</div>
         ) : (
-          <ul className="mt-3 space-y-2">
-            {todayTasks.map((t) => (
-              <li
-                key={t.id}
-                onDragOver={(e) => {
-                  e.preventDefault();
-                  setDragOverId(t.id);
-                }}
-                onDragLeave={() => setDragOverId((prev) => (prev === t.id ? null : prev))}
-                onDrop={(e) => {
-                  e.preventDefault();
-                  const fromId = e.dataTransfer.getData("text/plain");
-                  handleDrop(fromId, t.id);
-                }}
-                className={[
-                  "rounded-lg border px-3 py-2 text-sm",
-                  dragOverId === t.id ? "border-neutral-500" : "border-neutral-800",
-                  "bg-neutral-950",
-                ].join(" ")}
+          <div className="mt-3">
+            <DndContext
+              sensors={sensors}
+              collisionDetection={closestCenter}
+              onDragEnd={onDragEnd}
+            >
+              <SortableContext
+                items={todayTasks.map((t) => t.id)}
+                strategy={verticalListSortingStrategy}
               >
-                <div className="flex items-center gap-2">
-                  {/* D&D ハンドル */}
-                  <span
-                    draggable={!busy}
-                    onDragStart={(e) => {
-                      e.dataTransfer.setData("text/plain", t.id);
-                      e.dataTransfer.effectAllowed = "move";
-                    }}
-                    className="cursor-move select-none text-neutral-500"
-                    title="ドラッグで並び替え"
-                  >
-                    ⠿
-                  </span>
-
-                  <input
-                    type="checkbox"
-                    checked={!!selected[t.id]}
-                    onChange={() => toggle(t.id)}
-                    disabled={busy}
-                  />
-
-                  <div className="flex-1">{t.title}</div>
-
-                  {/* 4) 1週間後へ */}
-                  <button
-                    type="button"
-                    onClick={() => onWeek(t.id)}
-                    disabled={busy}
-                    className="rounded border border-neutral-800 px-2 py-1 text-xs hover:bg-neutral-900 disabled:opacity-50"
-                  >
-                    1週間後へ
-                  </button>
-
-                  {/* 5) 完了+1 */}
-                  <button
-                    type="button"
-                    onClick={() => onDone(t.id)}
-                    disabled={busy}
-                    className="rounded border border-neutral-800 px-2 py-1 text-xs hover:bg-neutral-900 disabled:opacity-50"
-                  >
-                    完了
-                  </button>
-
-                  {/* 6) 除去 */}
-                  <button
-                    type="button"
-                    onClick={() => onRemove(t.id)}
-                    disabled={busy}
-                    className="rounded border border-neutral-800 px-2 py-1 text-xs hover:bg-neutral-900 disabled:opacity-50"
-                  >
-                    除去
-                  </button>
-                </div>
-              </li>
-            ))}
-          </ul>
+                <ul className="space-y-2">
+                  {todayTasks.map((t) => (
+                    <SortableTaskRow
+                      key={t.id}
+                      task={t}
+                      busy={busy}
+                      checked={!!selected[t.id]}
+                      onToggle={() => toggle(t.id)}
+                      onWeek={() => onWeek(t.id)}
+                      onDone={() => onDone(t.id)}
+                      onRemove={() => onRemove(t.id)}
+                    />
+                  ))}
+                </ul>
+              </SortableContext>
+            </DndContext>
+          </div>
         )}
 
         {/* 投げ先 */}
@@ -535,13 +602,7 @@ export default function Page() {
               >
                 <div className="flex items-center gap-2">
                   <div className="flex-1">{t.title}</div>
-
-                  {/* 11) 日付表示（戻しの左） */}
-                  <div className="text-xs text-neutral-400">
-                    ({formatYYMMDD(t.dueDate)})
-                  </div>
-
-                  {/* 10) 戻し：dueDate=左上日付 */}
+                  <div className="text-xs text-neutral-400">({formatYYMMDD(t.dueDate)})</div>
                   <button
                     type="button"
                     onClick={() => onBackFromFuture(t.id)}
@@ -572,13 +633,7 @@ export default function Page() {
               >
                 <div className="flex items-center gap-2">
                   <div className="flex-1">{t.title}</div>
-
-                  {/* 14) 完了回数表示（戻しの左） */}
-                  <div className="text-xs text-neutral-400">
-                    （完了回数: {t.doneCount}）
-                  </div>
-
-                  {/* 13) 戻し：dueDate=左上日付 + removed解除 */}
+                  <div className="text-xs text-neutral-400">（完了回数: {t.doneCount}）</div>
                   <button
                     type="button"
                     onClick={() => onBackFromRemoved(t.id)}
