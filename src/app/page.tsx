@@ -94,6 +94,10 @@ function SortableTaskRow(props: {
     opacity: isDragging ? 0.75 : 1,
     // モバイルでドラッグを効かせる
     touchAction: "none",
+    // モバイルでの長押しテキスト選択/コールアウトを抑制
+    userSelect: "none",
+    WebkitUserSelect: "none",
+    WebkitTouchCallout: "none",
   };
 
   const stopDragStart = (e: React.SyntheticEvent) => {
@@ -109,7 +113,9 @@ function SortableTaskRow(props: {
         "rounded-lg border px-3 py-2 text-sm",
         "border-neutral-800 bg-neutral-950",
         isDragging ? "ring-2 ring-neutral-600" : "",
+        "select-none",
       ].join(" ")}
+      onContextMenu={(e) => e.preventDefault()}
       // 行全体を掴める（PCもスマホも）
       {...attributes}
       {...listeners}
@@ -128,7 +134,7 @@ function SortableTaskRow(props: {
           onMouseDownCapture={stopDragStart}
         />
 
-        <div className="flex-1">{task.title}</div>
+        <div className="flex-1 select-none">{task.title}</div>
 
         <button
           type="button"
@@ -404,9 +410,10 @@ export default function Page() {
     useSensor(PointerSensor, {
       activationConstraint: { distance: 4 }, // PC：押して少し動かしたらドラッグ開始
     }),
-useSensor(TouchSensor, {
-  activationConstraint: { delay: 180, tolerance: 8 },
-}),
+    // スマホ：長押しでドラッグ開始（テキスト選択より先に掴ませる）
+    useSensor(TouchSensor, {
+      activationConstraint: { delay: 120, tolerance: 10 },
+    }),
     useSensor(KeyboardSensor)
   );
 
