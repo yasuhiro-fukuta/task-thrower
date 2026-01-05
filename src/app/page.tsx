@@ -9,9 +9,11 @@ import { addDaysISO, formatYYMMDD, todayISO } from "@/lib/dateOnly";
 import {
   createTask,
   listTasks,
+  setRemoved,
   completeTasks,
-  rescheduleTasks,
-  removeTasks,
+  throwToDueDate,
+  throwCompleteTasks,
+  throwRemoveTasks,
   updateSorters,
   updateTask,
   type Task,
@@ -44,6 +46,8 @@ type ThrowAction =
   | "YEAR"
   | "DONE"
   | "REMOVE";
+
+type MainTab = "TODAY" | "FUTURE" | "REMOVED";
 
 function actionToDays(a: ThrowAction): number | null {
   switch (a) {
@@ -79,11 +83,11 @@ function SortableTaskRow(props: {
   busy: boolean;
   checked: boolean;
   onToggle: () => void;
-  onWeek: () => void;
+  onTomorrow: () => void;
   onDone: () => void;
   onRemove: () => void;
 }) {
-  const { task, busy, checked, onToggle, onWeek, onDone, onRemove } = props;
+  const { task, busy, checked, onToggle, onTomorrow, onDone, onRemove } = props;
 
   const { attributes, listeners, setNodeRef, transform, transition, isDragging } =
     useSortable({ id: task.id });
@@ -94,7 +98,7 @@ function SortableTaskRow(props: {
     opacity: isDragging ? 0.75 : 1,
     // モバイルでドラッグを効かせる
     touchAction: "none",
-    // モバイルでの長押しテキスト選択/コールアウトを抑制
+    // モバイル長押しでのテキスト選択/コールアウトを抑止
     userSelect: "none",
     WebkitUserSelect: "none",
     WebkitTouchCallout: "none",
@@ -113,9 +117,7 @@ function SortableTaskRow(props: {
         "rounded-lg border px-3 py-2 text-sm",
         "border-neutral-800 bg-neutral-950",
         isDragging ? "ring-2 ring-neutral-600" : "",
-        "select-none",
       ].join(" ")}
-      onContextMenu={(e) => e.preventDefault()}
       // 行全体を掴める（PCもスマホも）
       {...attributes}
       {...listeners}
@@ -134,23 +136,23 @@ function SortableTaskRow(props: {
           onMouseDownCapture={stopDragStart}
         />
 
-        <div className="flex-1 select-none">{task.title}</div>
+        <div className="flex-1">{task.title}</div>
 
-        {/* 完了回数（1回以上で表示） */}
+        {/* 完了回数（1回以上のときだけ表示） */}
         {task.doneCount >= 1 && (
-          <span className="text-xs text-neutral-400 select-none">完了*{task.doneCount}</span>
+          <span className="text-xs text-neutral-400">完了×{task.doneCount}</span>
         )}
 
         <button
           type="button"
-          onClick={onWeek}
+          onClick={onTomorrow}
           disabled={busy}
           className="rounded border border-neutral-800 px-2 py-1 text-xs hover:bg-neutral-900 disabled:opacity-50"
           onPointerDownCapture={stopDragStart}
           onTouchStartCapture={stopDragStart}
           onMouseDownCapture={stopDragStart}
         >
-          1週間後へ
+          明日へ
         </button>
 
         <button
@@ -196,11 +198,10 @@ export default function Page() {
 
   // selection & throw
   const [selected, setSelected] = useState<Record<string, boolean>>({});
-  const [throwAction, setThrowAction] = useState<ThrowAction>("WEEK");
+  const [throwAction, setThrowAction] = useState<ThrowAction>("TOMORROW");
 
-  // tabs
-  type TabKey = "TODAY" | "FUTURE" | "REMOVED";
-  const [tab, setTab] = useState<TabKey>("TODAY");
+  // タブ表示
+  const [tab, setTab] = useState<MainTab>("TODAY");
 
   // toast
   const [msg, setMsg] = useState<string | null>(null);
@@ -228,7 +229,7 @@ export default function Page() {
     setSelected({});
   }, [baseDate]);
 
-  // タブ移動時：Today以外に行くなら選択を消す
+  // タブを切り替えたら選択はクリア（事故防止）
   useEffect(() => {
     if (tab !== "TODAY") setSelected({});
   }, [tab]);
@@ -312,16 +313,15 @@ export default function Page() {
     }
   };
 
-  // 4) 一週間後へ（個別）：dueDate = 左上日付 + 7
-  const onWeek = async (id: string) => {
+  // 個別：明日へ（dueDate = 左上日付 + 1） + 投げ回数+1
+  const onTomorrow = async (id: string) => {
     if (!user) return setAuthOpen(true);
     setBusy(true);
     try {
-      const target = addDaysISO(baseDate, 7);
-      // 仕様：1週間後へ は「投げ回数 +1」
-      await rescheduleTasks([id], target, { throwDelta: 1 });
+      const target = addDaysISO(baseDate, 1);
+      await throwToDueDate([id], target);
       await refresh(user);
-      toast("1週間後へ");
+      toast("明日へ");
     } catch (err: any) {
       toast(String(err?.message ?? err ?? "更新失敗"));
     } finally {
@@ -334,8 +334,7 @@ export default function Page() {
     if (!user) return setAuthOpen(true);
     setBusy(true);
     try {
-      // 仕様：完了 → 完了回数+1 & 最終完了日=左上日付（投げ回数は増やさない）
-      await completeTasks([id], baseDate, { doneDelta: 1, throwDelta: 0 });
+      await completeTasks([id], baseDate);
       await refresh(user);
       toast("完了+1");
     } catch (err: any) {
@@ -350,8 +349,7 @@ export default function Page() {
     if (!user) return setAuthOpen(true);
     setBusy(true);
     try {
-      // 仕様：除去（個別）は投げ回数は増やさない
-      await removeTasks([id], true, { throwDelta: 0 });
+      await setRemoved([id], true);
       await refresh(user);
       toast("除去");
     } catch (err: any) {
@@ -369,18 +367,15 @@ export default function Page() {
     setBusy(true);
     try {
       if (throwAction === "DONE") {
-        // 仕様：投げる(完了) → 完了回数+1 & 最終完了日=左上日付 & 投げ回数+1
-        await completeTasks(selectedIds, baseDate, { doneDelta: 1, throwDelta: 1 });
+        await throwCompleteTasks(selectedIds, baseDate);
         toast("完了+1");
       } else if (throwAction === "REMOVE") {
-        // 仕様：投げる(除去) → removed=true & 投げ回数+1
-        await removeTasks(selectedIds, true, { throwDelta: 1 });
+        await throwRemoveTasks(selectedIds);
         toast("除去");
       } else {
         const days = actionToDays(throwAction)!;
         const target = addDaysISO(baseDate, days);
-        // 仕様：投げる(日付系) → dueDate更新 & 投げ回数+1
-        await rescheduleTasks(selectedIds, target, { throwDelta: 1 });
+        await throwToDueDate(selectedIds, target);
         toast(`投げた→${target}`);
       }
 
@@ -430,10 +425,9 @@ export default function Page() {
     useSensor(PointerSensor, {
       activationConstraint: { distance: 4 }, // PC：押して少し動かしたらドラッグ開始
     }),
-    // スマホ：長押しでドラッグ開始（テキスト選択より先に掴ませる）
-    useSensor(TouchSensor, {
-      activationConstraint: { delay: 120, tolerance: 10 },
-    }),
+useSensor(TouchSensor, {
+  activationConstraint: { delay: 180, tolerance: 8 },
+}),
     useSensor(KeyboardSensor)
   );
 
@@ -534,35 +528,57 @@ export default function Page() {
         </button>
       </form>
 
-      {/* タブ表示（今日 / 未来 / 廃棄済） */}
-      <section className="mt-6 rounded-xl border border-neutral-800">
-        <div className="flex gap-2 border-b border-neutral-800 px-2 pt-2">
-          {(
-            [
-              ["TODAY", "今日のタスク"],
-              ["FUTURE", "未来のタスク"],
-              ["REMOVED", "廃棄済"],
-            ] as const
-          ).map(([key, label]) => (
-            <button
-              key={key}
-              type="button"
-              onClick={() => setTab(key)}
-              className={[
-                "rounded-t-lg border border-neutral-800 px-3 py-2 text-sm",
-                tab === key ? "bg-neutral-950" : "bg-neutral-900/40 text-neutral-400",
-              ].join(" ")}
-            >
-              {label}
-            </button>
-          ))}
-          <div className="flex-1" />
-          {tab === "TODAY" && (
-            <div className="px-2 py-2 text-xs text-neutral-400">選択中: {selectedIds.length}</div>
-          )}
+      {/* タブ（今日 / 未来 / 廃棄済） */}
+      <div className="mt-6">
+        <div className="flex items-end gap-2">
+          <button
+            type="button"
+            onClick={() => setTab("TODAY")}
+            className={[
+              "rounded-t-lg border border-neutral-800 px-3 py-2 text-sm",
+              tab === "TODAY"
+                ? "bg-neutral-950 text-neutral-100"
+                : "bg-neutral-900/40 text-neutral-400 hover:bg-neutral-950 hover:text-neutral-100",
+            ].join(" ")}
+            disabled={busy}
+          >
+            今日のタスク
+          </button>
+
+          <button
+            type="button"
+            onClick={() => setTab("FUTURE")}
+            className={[
+              "rounded-t-lg border border-neutral-800 px-3 py-2 text-sm",
+              tab === "FUTURE"
+                ? "bg-neutral-950 text-neutral-100"
+                : "bg-neutral-900/40 text-neutral-400 hover:bg-neutral-950 hover:text-neutral-100",
+            ].join(" ")}
+            disabled={busy}
+          >
+            未来のタスク
+          </button>
+
+          <button
+            type="button"
+            onClick={() => setTab("REMOVED")}
+            className={[
+              "rounded-t-lg border border-neutral-800 px-3 py-2 text-sm",
+              tab === "REMOVED"
+                ? "bg-neutral-950 text-neutral-100"
+                : "bg-neutral-900/40 text-neutral-400 hover:bg-neutral-950 hover:text-neutral-100",
+            ].join(" ")}
+            disabled={busy}
+          >
+            廃棄済
+          </button>
+
+          <div className="ml-auto text-xs text-neutral-400">
+            {tab === "TODAY" ? `選択中: ${selectedIds.length}` : ""}
+          </div>
         </div>
 
-        <div className="p-4">
+        <section className="rounded-b-xl rounded-tr-xl border border-neutral-800 p-4">
           {/* TODAY */}
           {tab === "TODAY" && (
             <>
@@ -587,7 +603,7 @@ export default function Page() {
                             busy={busy}
                             checked={!!selected[t.id]}
                             onToggle={() => toggle(t.id)}
-                            onWeek={() => onWeek(t.id)}
+                            onTomorrow={() => onTomorrow(t.id)}
                             onDone={() => onDone(t.id)}
                             onRemove={() => onRemove(t.id)}
                           />
@@ -635,7 +651,9 @@ export default function Page() {
                   投げる
                 </button>
 
-                <div className="mt-2 text-xs text-neutral-500">※チェック→投げ先→投げる</div>
+                <div className="mt-2 text-xs text-neutral-500">
+                  ※チェック→投げ先→投げる
+                </div>
               </div>
             </>
           )}
@@ -654,7 +672,9 @@ export default function Page() {
                     >
                       <div className="flex items-center gap-2">
                         <div className="flex-1">{t.title}</div>
-                        <div className="text-xs text-neutral-400">({formatYYMMDD(t.dueDate)})</div>
+                        <div className="text-xs text-neutral-400">
+                          ({formatYYMMDD(t.dueDate)})
+                        </div>
                         <button
                           type="button"
                           onClick={() => onBackFromFuture(t.id)}
@@ -678,42 +698,37 @@ export default function Page() {
                 <div className="text-sm text-neutral-500">空</div>
               ) : (
                 <ul className="space-y-2">
-                  {removedTasks.map((t) => {
-                    const due = formatYYMMDD(t.dueDate);
-                    const done = t.lastDoneDate ? formatYYMMDD(t.lastDoneDate) : "";
-                    const dueToDone = `(${due})->${done ? `(${done})` : ""}`;
+                  {removedTasks.map((t) => (
+                    <li
+                      key={t.id}
+                      className="rounded-lg border border-neutral-800 bg-neutral-950 px-3 py-2 text-sm"
+                    >
+                      <div className="flex items-center gap-2">
+                        <div className="flex-1">{t.title}</div>
 
-                    return (
-                      <li
-                        key={t.id}
-                        className="rounded-lg border border-neutral-800 bg-neutral-950 px-3 py-2 text-sm"
-                      >
-                        <div className="flex items-center gap-2">
-                          <div className="flex-1">{t.title}</div>
-
-                          <div className="text-xs text-neutral-400">（完了回数: {t.doneCount}）</div>
-
-                          {/* 納期→完了日 */}
-                          <div className="text-xs text-neutral-400">{dueToDone}</div>
-
-                          <button
-                            type="button"
-                            onClick={() => onBackFromRemoved(t.id)}
-                            disabled={busy}
-                            className="rounded border border-neutral-800 px-2 py-1 text-xs hover:bg-neutral-900 disabled:opacity-50"
-                          >
-                            戻し
-                          </button>
+                        <div className="text-xs text-neutral-400">（完了回数: {t.doneCount}）</div>
+                        <div className="text-xs text-neutral-400">
+                          （{formatYYMMDD(t.dueDate)}→
+                          {t.lastDoneDate ? formatYYMMDD(t.lastDoneDate) : ""}）
                         </div>
-                      </li>
-                    );
-                  })}
+
+                        <button
+                          type="button"
+                          onClick={() => onBackFromRemoved(t.id)}
+                          disabled={busy}
+                          className="rounded border border-neutral-800 px-2 py-1 text-xs hover:bg-neutral-900 disabled:opacity-50"
+                        >
+                          戻し
+                        </button>
+                      </div>
+                    </li>
+                  ))}
                 </ul>
               )}
             </>
           )}
-        </div>
-      </section>
+        </section>
+      </div>
 
       {msg && (
         <div className="mt-4 rounded-lg border border-neutral-800 bg-neutral-950 px-3 py-2 text-xs">

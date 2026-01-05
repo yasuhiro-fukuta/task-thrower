@@ -17,9 +17,7 @@ export type Task = {
   dueDate: string; // YYYY-MM-DD
   removed: boolean;
   doneCount: number;
-  // 最終完了日 (YYYY-MM-DD) / 未設定なら空文字
-  lastDoneDate: string;
-  // 投げ回数
+  lastDoneDate: string; // YYYY-MM-DD or ""
   throwCount: number;
   sorter: number;
   createdAtMs: number;
@@ -93,7 +91,7 @@ export async function listTasks(uid: string): Promise<Task[]> {
     const dueDate = str(data?.dueDate) || "9999-12-31";
     const removed = bool(data?.removed);
     const doneCount = Math.max(0, num(data?.doneCount));
-    const lastDoneDate = str(data?.lastDoneDate);
+    const lastDoneDate = str(data?.lastDoneDate) || "";
     const throwCount = Math.max(0, num(data?.throwCount));
     let sorter = num(data?.sorter);
 
@@ -156,71 +154,77 @@ export async function incrementDoneCount(taskIds: string[], delta = 1) {
   );
 }
 
-export async function incrementThrowCount(taskIds: string[], delta = 1) {
+// 完了回数を+1し、最終完了日を更新（投げ回数は増やさない）
+export async function completeTasks(taskIds: string[], doneDate: string) {
   const ids = uniq(taskIds);
   if (!ids.length) return;
 
   const now = Date.now();
   await batchUpdate(
-    ids.map((id) => ({ id, data: { throwCount: increment(delta) } })),
+    ids.map((id) => ({
+      id,
+      data: {
+        doneCount: increment(1),
+        lastDoneDate: doneDate,
+      },
+    })),
     now
   );
 }
 
-// 完了：doneCount +1 & lastDoneDate を更新（必要なら throwCount も +1）
-export async function completeTasks(
-  taskIds: string[],
-  lastDoneDate: string,
-  options?: { throwDelta?: number; doneDelta?: number }
-) {
+// 「投げる」(日付移動)：dueDate更新 + 投げ回数+1
+export async function throwToDueDate(taskIds: string[], dueDate: string) {
   const ids = uniq(taskIds);
   if (!ids.length) return;
 
-  const doneDelta = options?.doneDelta ?? 1;
-  const throwDelta = options?.throwDelta ?? 0;
-
-  const data: Record<string, any> = {
-    doneCount: increment(doneDelta),
-    lastDoneDate,
-  };
-  if (throwDelta) data.throwCount = increment(throwDelta);
-
   const now = Date.now();
-  await batchUpdate(ids.map((id) => ({ id, data })), now);
+  await batchUpdate(
+    ids.map((id) => ({
+      id,
+      data: {
+        dueDate,
+        throwCount: increment(1),
+      },
+    })),
+    now
+  );
 }
 
-// 期限変更：dueDate を更新（必要なら throwCount も +1）
-export async function rescheduleTasks(
-  taskIds: string[],
-  dueDate: string,
-  options?: { throwDelta?: number }
-) {
+// 「投げる」(完了)：完了回数+1 + 最終完了日更新 + 投げ回数+1
+export async function throwCompleteTasks(taskIds: string[], doneDate: string) {
   const ids = uniq(taskIds);
   if (!ids.length) return;
 
-  const throwDelta = options?.throwDelta ?? 0;
-  const data: Record<string, any> = { dueDate };
-  if (throwDelta) data.throwCount = increment(throwDelta);
-
   const now = Date.now();
-  await batchUpdate(ids.map((id) => ({ id, data })), now);
+  await batchUpdate(
+    ids.map((id) => ({
+      id,
+      data: {
+        doneCount: increment(1),
+        lastDoneDate: doneDate,
+        throwCount: increment(1),
+      },
+    })),
+    now
+  );
 }
 
-// 除去：removed を更新（必要なら throwCount も +1）
-export async function removeTasks(
-  taskIds: string[],
-  removed: boolean,
-  options?: { throwDelta?: number }
-) {
+// 「投げる」(除去)：removed=true + 投げ回数+1
+export async function throwRemoveTasks(taskIds: string[]) {
   const ids = uniq(taskIds);
   if (!ids.length) return;
 
-  const throwDelta = options?.throwDelta ?? 0;
-  const data: Record<string, any> = { removed };
-  if (throwDelta) data.throwCount = increment(throwDelta);
-
   const now = Date.now();
-  await batchUpdate(ids.map((id) => ({ id, data })), now);
+  await batchUpdate(
+    ids.map((id) => ({
+      id,
+      data: {
+        removed: true,
+        throwCount: increment(1),
+      },
+    })),
+    now
+  );
 }
 
 export async function updateSorters(items: { id: string; sorter: number }[]) {
