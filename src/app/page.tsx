@@ -9,12 +9,10 @@ import { addDaysISO, formatYYMMDD, todayISO } from "@/lib/dateOnly";
 import {
   createTask,
   listTasks,
-  setRemoved,
   completeTasks,
-  throwToDueDate,
-  throwCompleteTasks,
-  throwRemoveTasks,
-  updateSorters,
+  rescheduleTasks,
+  removeTasks,
+  updateOrdering,
   updateTask,
   type Task,
 } from "@/lib/taskStore";
@@ -40,14 +38,11 @@ import { CSS } from "@dnd-kit/utilities";
 type ThrowAction =
   | "TOMORROW"
   | "DAY_AFTER"
-  | "WEEK"
   | "MONTH"
   | "MONTH3"
   | "YEAR"
   | "DONE"
   | "REMOVE";
-
-type MainTab = "TODAY" | "FUTURE" | "REMOVED";
 
 function actionToDays(a: ThrowAction): number | null {
   switch (a) {
@@ -55,8 +50,6 @@ function actionToDays(a: ThrowAction): number | null {
       return 1;
     case "DAY_AFTER":
       return 2;
-    case "WEEK":
-      return 7;
     case "MONTH":
       return 30;
     case "MONTH3":
@@ -84,10 +77,12 @@ function SortableTaskRow(props: {
   checked: boolean;
   onToggle: () => void;
   onTomorrow: () => void;
+  onChangeSortOrder: (sortOrder: number) => void;
   onDone: () => void;
   onRemove: () => void;
 }) {
-  const { task, busy, checked, onToggle, onTomorrow, onDone, onRemove } = props;
+  const { task, busy, checked, onToggle, onTomorrow, onChangeSortOrder, onDone, onRemove } =
+    props;
 
   const { attributes, listeners, setNodeRef, transform, transition, isDragging } =
     useSortable({ id: task.id });
@@ -98,7 +93,7 @@ function SortableTaskRow(props: {
     opacity: isDragging ? 0.75 : 1,
     // モバイルでドラッグを効かせる
     touchAction: "none",
-    // モバイル長押しでのテキスト選択/コールアウトを抑止
+    // モバイルでの長押しテキスト選択/コールアウトを抑制
     userSelect: "none",
     WebkitUserSelect: "none",
     WebkitTouchCallout: "none",
@@ -117,14 +112,30 @@ function SortableTaskRow(props: {
         "rounded-lg border px-3 py-2 text-sm",
         "border-neutral-800 bg-neutral-950",
         isDragging ? "ring-2 ring-neutral-600" : "",
+        "select-none",
       ].join(" ")}
+      onContextMenu={(e) => e.preventDefault()}
       // 行全体を掴める（PCもスマホも）
       {...attributes}
       {...listeners}
     >
       <div className="flex items-center gap-2">
-        {/* 並び替え用の見た目（ハンドルじゃなく飾り。掴むのは行全体） */}
-        <span className="select-none text-neutral-600">⋮⋮</span>
+        {/* ソート順（1〜24） */}
+        <select
+          value={task.sortOrder}
+          onChange={(e) => onChangeSortOrder(Number(e.target.value))}
+          disabled={busy}
+          className="w-16 rounded border border-neutral-800 bg-neutral-950 px-2 py-1 text-xs text-neutral-200"
+          onPointerDownCapture={stopDragStart}
+          onTouchStartCapture={stopDragStart}
+          onMouseDownCapture={stopDragStart}
+        >
+          {Array.from({ length: 24 }, (_, i) => i + 1).map((n) => (
+            <option key={n} value={n}>
+              {n}
+            </option>
+          ))}
+        </select>
 
         <input
           type="checkbox"
@@ -136,11 +147,11 @@ function SortableTaskRow(props: {
           onMouseDownCapture={stopDragStart}
         />
 
-        <div className="flex-1">{task.title}</div>
+        <div className="flex-1 select-none">{task.title}</div>
 
-        {/* 完了回数（1回以上のときだけ表示） */}
+        {/* 完了回数（1回以上で表示） */}
         {task.doneCount >= 1 && (
-          <span className="text-xs text-neutral-400">完了×{task.doneCount}</span>
+          <span className="text-xs text-neutral-400 select-none">完了*{task.doneCount}</span>
         )}
 
         <button
@@ -194,14 +205,17 @@ export default function Page() {
   // Tasks
   const [allTasks, setAllTasks] = useState<Task[]>([]);
   const [title, setTitle] = useState("");
+  // 新規追加時のソート順（1〜24）
+  const [newSortOrder, setNewSortOrder] = useState<number>(24);
   const [busy, setBusy] = useState(false);
 
   // selection & throw
   const [selected, setSelected] = useState<Record<string, boolean>>({});
   const [throwAction, setThrowAction] = useState<ThrowAction>("TOMORROW");
 
-  // タブ表示
-  const [tab, setTab] = useState<MainTab>("TODAY");
+  // tabs
+  type TabKey = "TODAY" | "FUTURE" | "REMOVED";
+  const [tab, setTab] = useState<TabKey>("TODAY");
 
   // toast
   const [msg, setMsg] = useState<string | null>(null);
@@ -229,7 +243,7 @@ export default function Page() {
     setSelected({});
   }, [baseDate]);
 
-  // タブを切り替えたら選択はクリア（事故防止）
+  // タブ移動時：Today以外に行くなら選択を消す
   useEffect(() => {
     if (tab !== "TODAY") setSelected({});
   }, [tab]);
@@ -242,6 +256,7 @@ export default function Page() {
     return activeTasks
       .filter((t) => t.dueDate <= baseDate)
       .sort((a, b) => {
+        if (a.sortOrder !== b.sortOrder) return (a.sortOrder || 24) - (b.sortOrder || 24);
         if (a.sorter !== b.sorter) return (a.sorter || 0) - (b.sorter || 0);
         return (a.createdAtMs || 0) - (b.createdAtMs || 0);
       });
@@ -288,6 +303,35 @@ export default function Page() {
     setSelected((prev) => ({ ...prev, [id]: !prev[id] }));
   };
 
+  // 今日タスク：ソート順（1〜24）を変更
+  const onSetSortOrder = async (id: string, sortOrderRaw: number) => {
+    if (!user) return setAuthOpen(true);
+    const sortOrder = Math.min(24, Math.max(1, Math.trunc(sortOrderRaw || 24)));
+
+    const cur = todayTasks.find((t) => t.id === id);
+    if (cur && cur.sortOrder === sortOrder) return;
+
+    setBusy(true);
+    try {
+      // 変更したものはグループ末尾に寄せる（細かい順番はD&Dで調整）
+      const sorter = nextSorter(todayTasks);
+
+      // 先にローカル反映
+      setAllTasks((prev) =>
+        prev.map((t) => (t.id === id ? { ...t, sortOrder, sorter } : t))
+      );
+
+      await updateTask(id, { sortOrder, sorter });
+      toast(`順→${sortOrder}`);
+      await refresh(user);
+    } catch (err: any) {
+      toast(String(err?.message ?? err ?? "更新失敗"));
+      await refresh(user);
+    } finally {
+      setBusy(false);
+    }
+  };
+
   // 2) タスク追加：dueDate = 左上日付
   const onAdd = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -302,7 +346,8 @@ export default function Page() {
     setBusy(true);
     try {
       const sorter = nextSorter(todayTasks);
-      await createTask({ uid: user.uid, title: t, dueDate: baseDate, sorter });
+      const sortOrder = Math.min(24, Math.max(1, Math.trunc(newSortOrder || 24)));
+      await createTask({ uid: user.uid, title: t, dueDate: baseDate, sortOrder, sorter });
       setTitle("");
       await refresh(user);
       toast("追加");
@@ -313,13 +358,14 @@ export default function Page() {
     }
   };
 
-  // 個別：明日へ（dueDate = 左上日付 + 1） + 投げ回数+1
+  // 4) 明日へ（個別）：dueDate = 左上日付 + 1
   const onTomorrow = async (id: string) => {
     if (!user) return setAuthOpen(true);
     setBusy(true);
     try {
       const target = addDaysISO(baseDate, 1);
-      await throwToDueDate([id], target);
+      // 仕様：明日へ は「投げ回数 +1」
+      await rescheduleTasks([id], target, { throwDelta: 1 });
       await refresh(user);
       toast("明日へ");
     } catch (err: any) {
@@ -334,7 +380,8 @@ export default function Page() {
     if (!user) return setAuthOpen(true);
     setBusy(true);
     try {
-      await completeTasks([id], baseDate);
+      // 仕様：完了 → 完了回数+1 & 最終完了日=左上日付（投げ回数は増やさない）
+      await completeTasks([id], baseDate, { doneDelta: 1, throwDelta: 0 });
       await refresh(user);
       toast("完了+1");
     } catch (err: any) {
@@ -349,7 +396,8 @@ export default function Page() {
     if (!user) return setAuthOpen(true);
     setBusy(true);
     try {
-      await setRemoved([id], true);
+      // 仕様：除去（個別）は投げ回数は増やさない
+      await removeTasks([id], true, { throwDelta: 0 });
       await refresh(user);
       toast("除去");
     } catch (err: any) {
@@ -367,15 +415,18 @@ export default function Page() {
     setBusy(true);
     try {
       if (throwAction === "DONE") {
-        await throwCompleteTasks(selectedIds, baseDate);
+        // 仕様：投げる(完了) → 完了回数+1 & 最終完了日=左上日付 & 投げ回数+1
+        await completeTasks(selectedIds, baseDate, { doneDelta: 1, throwDelta: 1 });
         toast("完了+1");
       } else if (throwAction === "REMOVE") {
-        await throwRemoveTasks(selectedIds);
+        // 仕様：投げる(除去) → removed=true & 投げ回数+1
+        await removeTasks(selectedIds, true, { throwDelta: 1 });
         toast("除去");
       } else {
         const days = actionToDays(throwAction)!;
         const target = addDaysISO(baseDate, days);
-        await throwToDueDate(selectedIds, target);
+        // 仕様：投げる(日付系) → dueDate更新 & 投げ回数+1
+        await rescheduleTasks(selectedIds, target, { throwDelta: 1 });
         toast(`投げた→${target}`);
       }
 
@@ -425,13 +476,16 @@ export default function Page() {
     useSensor(PointerSensor, {
       activationConstraint: { distance: 4 }, // PC：押して少し動かしたらドラッグ開始
     }),
-useSensor(TouchSensor, {
-  activationConstraint: { delay: 180, tolerance: 8 },
-}),
+    // スマホ：長押しでドラッグ開始（テキスト選択より先に掴ませる）
+    useSensor(TouchSensor, {
+      activationConstraint: { delay: 120, tolerance: 10 },
+    }),
     useSensor(KeyboardSensor)
   );
 
-  // 8) 並べ替え：dropでsorter更新（今日タスクのみ）
+  // 8) 並べ替え：dropで sorter/sortOrder 更新（今日タスクのみ）
+  // 仕様：ドロップ位置の「直前タスクの sortOrder」を引き継ぐ
+  // 例：ソート順6と7の間に置く → sortOrder は 6
   const onDragEnd = async (event: DragEndEvent) => {
     const { active, over } = event;
     if (!active?.id || !over?.id) return;
@@ -445,21 +499,33 @@ useSensor(TouchSensor, {
 
     const moved = arrayMove(todayTasks, oldIndex, newIndex);
 
-    // sorterを 1000,2000,... に振り直し
-    const updates = moved.map((t, i) => ({ id: t.id, sorter: (i + 1) * 1000 }));
+    const prev = moved[newIndex - 1];
+    const next = moved[newIndex + 1];
+    const movedTask = moved[newIndex];
+    const inherited = Math.min(
+      24,
+      Math.max(1, Math.trunc((prev?.sortOrder ?? next?.sortOrder ?? movedTask.sortOrder ?? 24) || 24))
+    );
+
+    // sorterを 1000,2000,... に振り直し（同じ sortOrder 内の並びは sorter で保持）
+    const updates = moved.map((t, i) => ({
+      id: t.id,
+      sorter: (i + 1) * 1000,
+      sortOrder: i === newIndex ? inherited : t.sortOrder,
+    }));
 
     setBusy(true);
     try {
       // 先にローカル反映（体感速い）
-      const map = new Map(updates.map((u) => [u.id, u.sorter]));
+      const map = new Map(updates.map((u) => [u.id, u]));
       setAllTasks((prev) =>
         prev.map((t) => {
-          const s = map.get(t.id);
-          return s ? { ...t, sorter: s } : t;
+          const u = map.get(t.id);
+          return u ? { ...t, sorter: u.sorter, sortOrder: u.sortOrder } : t;
         })
       );
 
-      await updateSorters(updates);
+      await updateOrdering(updates);
       toast("並べ替え");
     } catch (err: any) {
       toast(String(err?.message ?? err ?? "並べ替え失敗"));
@@ -512,6 +578,19 @@ useSensor(TouchSensor, {
       </header>
 
       <form onSubmit={onAdd} className="mt-4 flex gap-2">
+        <select
+          value={newSortOrder}
+          onChange={(e) => setNewSortOrder(Number(e.target.value))}
+          disabled={busy}
+          className="w-24 rounded-md border border-neutral-800 bg-neutral-950 px-2 py-2 text-sm"
+          aria-label="ソート順"
+        >
+          {Array.from({ length: 24 }, (_, i) => i + 1).map((n) => (
+            <option key={n} value={n}>
+              順:{n}
+            </option>
+          ))}
+        </select>
         <input
           value={title}
           onChange={(e) => setTitle(e.target.value)}
@@ -528,57 +607,35 @@ useSensor(TouchSensor, {
         </button>
       </form>
 
-      {/* タブ（今日 / 未来 / 廃棄済） */}
-      <div className="mt-6">
-        <div className="flex items-end gap-2">
-          <button
-            type="button"
-            onClick={() => setTab("TODAY")}
-            className={[
-              "rounded-t-lg border border-neutral-800 px-3 py-2 text-sm",
-              tab === "TODAY"
-                ? "bg-neutral-950 text-neutral-100"
-                : "bg-neutral-900/40 text-neutral-400 hover:bg-neutral-950 hover:text-neutral-100",
-            ].join(" ")}
-            disabled={busy}
-          >
-            今日のタスク
-          </button>
-
-          <button
-            type="button"
-            onClick={() => setTab("FUTURE")}
-            className={[
-              "rounded-t-lg border border-neutral-800 px-3 py-2 text-sm",
-              tab === "FUTURE"
-                ? "bg-neutral-950 text-neutral-100"
-                : "bg-neutral-900/40 text-neutral-400 hover:bg-neutral-950 hover:text-neutral-100",
-            ].join(" ")}
-            disabled={busy}
-          >
-            未来のタスク
-          </button>
-
-          <button
-            type="button"
-            onClick={() => setTab("REMOVED")}
-            className={[
-              "rounded-t-lg border border-neutral-800 px-3 py-2 text-sm",
-              tab === "REMOVED"
-                ? "bg-neutral-950 text-neutral-100"
-                : "bg-neutral-900/40 text-neutral-400 hover:bg-neutral-950 hover:text-neutral-100",
-            ].join(" ")}
-            disabled={busy}
-          >
-            廃棄済
-          </button>
-
-          <div className="ml-auto text-xs text-neutral-400">
-            {tab === "TODAY" ? `選択中: ${selectedIds.length}` : ""}
-          </div>
+      {/* タブ表示（今日 / 未来 / 廃棄済） */}
+      <section className="mt-6 rounded-xl border border-neutral-800">
+        <div className="flex gap-2 border-b border-neutral-800 px-2 pt-2">
+          {(
+            [
+              ["TODAY", "今日のタスク"],
+              ["FUTURE", "未来のタスク"],
+              ["REMOVED", "廃棄済"],
+            ] as const
+          ).map(([key, label]) => (
+            <button
+              key={key}
+              type="button"
+              onClick={() => setTab(key)}
+              className={[
+                "rounded-t-lg border border-neutral-800 px-3 py-2 text-sm",
+                tab === key ? "bg-neutral-950" : "bg-neutral-900/40 text-neutral-400",
+              ].join(" ")}
+            >
+              {label}
+            </button>
+          ))}
+          <div className="flex-1" />
+          {tab === "TODAY" && (
+            <div className="px-2 py-2 text-xs text-neutral-400">選択中: {selectedIds.length}</div>
+          )}
         </div>
 
-        <section className="rounded-b-xl rounded-tr-xl border border-neutral-800 p-4">
+        <div className="p-4">
           {/* TODAY */}
           {tab === "TODAY" && (
             <>
@@ -604,6 +661,7 @@ useSensor(TouchSensor, {
                             checked={!!selected[t.id]}
                             onToggle={() => toggle(t.id)}
                             onTomorrow={() => onTomorrow(t.id)}
+                            onChangeSortOrder={(n) => onSetSortOrder(t.id, n)}
                             onDone={() => onDone(t.id)}
                             onRemove={() => onRemove(t.id)}
                           />
@@ -622,7 +680,6 @@ useSensor(TouchSensor, {
                   {[
                     ["TOMORROW", "明日"],
                     ["DAY_AFTER", "明後日"],
-                    ["WEEK", "1週間"],
                     ["MONTH", "1ヶ月"],
                     ["MONTH3", "3か月"],
                     ["YEAR", "1年"],
@@ -651,9 +708,7 @@ useSensor(TouchSensor, {
                   投げる
                 </button>
 
-                <div className="mt-2 text-xs text-neutral-500">
-                  ※チェック→投げ先→投げる
-                </div>
+                <div className="mt-2 text-xs text-neutral-500">※チェック→投げ先→投げる</div>
               </div>
             </>
           )}
@@ -672,9 +727,7 @@ useSensor(TouchSensor, {
                     >
                       <div className="flex items-center gap-2">
                         <div className="flex-1">{t.title}</div>
-                        <div className="text-xs text-neutral-400">
-                          ({formatYYMMDD(t.dueDate)})
-                        </div>
+                        <div className="text-xs text-neutral-400">({formatYYMMDD(t.dueDate)})</div>
                         <button
                           type="button"
                           onClick={() => onBackFromFuture(t.id)}
@@ -698,37 +751,42 @@ useSensor(TouchSensor, {
                 <div className="text-sm text-neutral-500">空</div>
               ) : (
                 <ul className="space-y-2">
-                  {removedTasks.map((t) => (
-                    <li
-                      key={t.id}
-                      className="rounded-lg border border-neutral-800 bg-neutral-950 px-3 py-2 text-sm"
-                    >
-                      <div className="flex items-center gap-2">
-                        <div className="flex-1">{t.title}</div>
+                  {removedTasks.map((t) => {
+                    const due = formatYYMMDD(t.dueDate);
+                    const done = t.lastDoneDate ? formatYYMMDD(t.lastDoneDate) : "";
+                    const dueToDone = `(${due})->${done ? `(${done})` : ""}`;
 
-                        <div className="text-xs text-neutral-400">（完了回数: {t.doneCount}）</div>
-                        <div className="text-xs text-neutral-400">
-                          （{formatYYMMDD(t.dueDate)}→
-                          {t.lastDoneDate ? formatYYMMDD(t.lastDoneDate) : ""}）
+                    return (
+                      <li
+                        key={t.id}
+                        className="rounded-lg border border-neutral-800 bg-neutral-950 px-3 py-2 text-sm"
+                      >
+                        <div className="flex items-center gap-2">
+                          <div className="flex-1">{t.title}</div>
+
+                          <div className="text-xs text-neutral-400">（完了回数: {t.doneCount}）</div>
+
+                          {/* 納期→完了日 */}
+                          <div className="text-xs text-neutral-400">{dueToDone}</div>
+
+                          <button
+                            type="button"
+                            onClick={() => onBackFromRemoved(t.id)}
+                            disabled={busy}
+                            className="rounded border border-neutral-800 px-2 py-1 text-xs hover:bg-neutral-900 disabled:opacity-50"
+                          >
+                            戻し
+                          </button>
                         </div>
-
-                        <button
-                          type="button"
-                          onClick={() => onBackFromRemoved(t.id)}
-                          disabled={busy}
-                          className="rounded border border-neutral-800 px-2 py-1 text-xs hover:bg-neutral-900 disabled:opacity-50"
-                        >
-                          戻し
-                        </button>
-                      </div>
-                    </li>
-                  ))}
+                      </li>
+                    );
+                  })}
                 </ul>
               )}
             </>
           )}
-        </section>
-      </div>
+        </div>
+      </section>
 
       {msg && (
         <div className="mt-4 rounded-lg border border-neutral-800 bg-neutral-950 px-3 py-2 text-xs">
