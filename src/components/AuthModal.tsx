@@ -34,7 +34,7 @@ export default function AuthModal({
 
   return (
     <div className="fixed inset-0 z-50">
-      <div className="absolute inset-0 bg-black/60" onClick={onClose} />
+      <div className="absolute inset-0 bg-black/60" onClick={busy ? undefined : onClose} />
 
       <div className="absolute left-1/2 top-1/2 w-[360px] max-w-[90vw]
                       -translate-x-1/2 -translate-y-1/2
@@ -50,7 +50,7 @@ export default function AuthModal({
         </button>
 
         {error && (
-          <div className="mt-2 text-xs text-red-400">{error}</div>
+          <div className="mt-2 text-xs text-red-400 whitespace-pre-wrap">{error}</div>
         )}
 
         <button
