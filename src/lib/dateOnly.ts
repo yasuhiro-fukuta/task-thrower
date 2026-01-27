@@ -1,3 +1,5 @@
+// src/lib/dateOnly.ts
+
 function pad2(n: number) {
   return String(n).padStart(2, "0");
 }
@@ -24,6 +26,8 @@ export function toISO(v: { y: number; m: number; d: number }): string {
   return `${v.y}-${pad2(v.m)}-${pad2(v.d)}`;
 }
 
+// 左上日付 + X日（Xは固定日数）
+// timezone事故回避のため UTC で計算
 export function addDaysISO(baseISO: string, days: number): string {
   if (!isISODate(baseISO)) throw new Error(`Invalid baseISO: ${baseISO}`);
   const { y, m, d } = parseISO(baseISO);
@@ -36,6 +40,7 @@ export function addDaysISO(baseISO: string, days: number): string {
   });
 }
 
+// (26/01/02) みたいな表示用
 export function formatYYMMDD(iso: string): string {
   if (!isISODate(iso)) return iso;
   const { y, m, d } = parseISO(iso);
